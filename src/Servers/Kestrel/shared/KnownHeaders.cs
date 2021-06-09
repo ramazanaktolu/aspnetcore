@@ -85,20 +85,11 @@ namespace CodeGenerator
                 HeaderNames.GrpcEncoding,
                 HeaderNames.KeepAlive,
                 HeaderNames.Pragma,
-                HeaderNames.Trailer,
                 HeaderNames.TransferEncoding,
                 HeaderNames.Upgrade,
                 HeaderNames.Via,
                 HeaderNames.Warning,
-                HeaderNames.Allow,
                 HeaderNames.ContentType,
-                HeaderNames.ContentEncoding,
-                HeaderNames.ContentLanguage,
-                HeaderNames.ContentLocation,
-                HeaderNames.ContentMD5,
-                HeaderNames.ContentRange,
-                HeaderNames.Expires,
-                HeaderNames.LastModified
             };
             // http://www.w3.org/TR/cors/#syntax
             var corsRequestHeaders = new[]
@@ -150,9 +141,11 @@ namespace CodeGenerator
                 HeaderNames.CorrelationContext,
                 HeaderNames.TraceParent,
                 HeaderNames.TraceState,
-                HeaderNames.Baggage
+                HeaderNames.Baggage,
             })
             .Concat(corsRequestHeaders)
+            .OrderBy(header => header)
+            .OrderBy(header => !requestPrimaryHeaders.Contains(header))
             .Select((header, index) => new KnownHeader
             {
                 Name = header,
@@ -197,6 +190,7 @@ namespace CodeGenerator
             {
                 HeaderNames.AcceptRanges,
                 HeaderNames.Age,
+                HeaderNames.Allow,
                 HeaderNames.AltSvc,
                 HeaderNames.ETag,
                 HeaderNames.Location,
@@ -206,9 +200,19 @@ namespace CodeGenerator
                 HeaderNames.Server,
                 HeaderNames.SetCookie,
                 HeaderNames.Vary,
+                HeaderNames.Expires,
                 HeaderNames.WWWAuthenticate,
+                HeaderNames.ContentRange,
+                HeaderNames.ContentEncoding,
+                HeaderNames.ContentLanguage,
+                HeaderNames.ContentLocation,
+                HeaderNames.ContentMD5,
+                HeaderNames.LastModified,
+                HeaderNames.Trailer,
             })
             .Concat(corsResponseHeaders)
+            .OrderBy(header => header)
+            .OrderBy(header => !responsePrimaryHeaders.Contains(header))
             .Select((header, index) => new KnownHeader
             {
                 Name = header,
@@ -232,6 +236,8 @@ namespace CodeGenerator
                 HeaderNames.GrpcMessage,
                 HeaderNames.GrpcStatus
             }
+            .OrderBy(header => header)
+            .OrderBy(header => !responsePrimaryHeaders.Contains(header))
             .Select((header, index) => new KnownHeader
             {
                 Name = header,
@@ -344,7 +350,7 @@ namespace CodeGenerator
 
         static string AppendSwitchSection(int length, IList<KnownHeader> values)
         {
-            var useVarForFirstTerm = values.Count() > 1 && values.Select(h => h.FirstNameIgnoreCaseSegment()).Distinct().Count() == 1;
+            var useVarForFirstTerm = values.Count > 1 && values.Select(h => h.FirstNameIgnoreCaseSegment()).Distinct().Count() == 1;
             var firstTermVarExpression = values.Select(h => h.FirstNameIgnoreCaseSegment()).FirstOrDefault();
             var firstTermVar = $"firstTerm{length}";
 
@@ -1182,7 +1188,7 @@ $@"        private void Clear(long bitsToClear)
                                 return;
                             }}")}
                         }}
-                        {(hi.Index + 1 < loop.Headers.Count() ? $"goto case {hi.Index + 1};" : "return;")}")}
+                        {(hi.Index + 1 < loop.Headers.Length ? $"goto case {hi.Index + 1};" : "return;")}")}
                     default:
                         return;
                 }}
@@ -1266,7 +1272,7 @@ $@"        private void Clear(long bitsToClear)
                 {{{Each(loop.Headers.Where(header => header.Identifier != "ContentLength"), header => $@"
                     case {header.Index}:
                         goto Header{header.Identifier};")}
-                    {(!loop.ClassName.Contains("Trailers") ? $@"case {loop.Headers.Count() - 1}:
+                    {(!loop.ClassName.Contains("Trailers") ? $@"case {loop.Headers.Length - 1}:
                         goto HeaderContentLength;" : "")}
                     default:
                         goto ExtraHeaders;
@@ -1276,28 +1282,28 @@ $@"        private void Clear(long bitsToClear)
                     if ({header.TestBit()})
                     {{
                         _current = new KeyValuePair<string, StringValues>(HeaderNames.{header.Identifier}, _collection._headers._{header.Identifier});
-                        _currentKnownType = KnownHeaderType.{header.Identifier};
-                        _next = {header.Index + 1};
+                        {(loop.ClassName.Contains("Request") ? "" : @$"_currentKnownType = KnownHeaderType.{header.Identifier};
+                        ")}_next = {header.Index + 1};
                         return true;
                     }}")}
-                {(!loop.ClassName.Contains("Trailers") ? $@"HeaderContentLength: // case {loop.Headers.Count() - 1}
+                {(!loop.ClassName.Contains("Trailers") ? $@"HeaderContentLength: // case {loop.Headers.Length - 1}
                     if (_collection._contentLength.HasValue)
                     {{
                         _current = new KeyValuePair<string, StringValues>(HeaderNames.ContentLength, HeaderUtilities.FormatNonNegativeInt64(_collection._contentLength.Value));
-                        _currentKnownType = KnownHeaderType.ContentLength;
-                        _next = {loop.Headers.Count()};
+                        {(loop.ClassName.Contains("Request") ? "" : @"_currentKnownType = KnownHeaderType.ContentLength;
+                        ")}_next = {loop.Headers.Length};
                         return true;
                     }}" : "")}
                 ExtraHeaders:
                     if (!_hasUnknown || !_unknownEnumerator.MoveNext())
                     {{
                         _current = default(KeyValuePair<string, StringValues>);
-                        _currentKnownType = default;
-                        return false;
+                        {(loop.ClassName.Contains("Request") ? "" : @"_currentKnownType = default;
+                        ")}return false;
                     }}
                     _current = _unknownEnumerator.Current;
-                    _currentKnownType = KnownHeaderType.Unknown;
-                    return true;
+                    {(loop.ClassName.Contains("Request") ? "" : @"_currentKnownType = KnownHeaderType.Unknown;
+                    ")}return true;
             }}
         }}
     }}

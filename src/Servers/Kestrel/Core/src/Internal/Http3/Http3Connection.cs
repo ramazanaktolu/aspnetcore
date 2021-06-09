@@ -21,36 +21,31 @@ using Microsoft.Extensions.Logging;
 
 namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http3
 {
-    internal class Http3Connection : ITimeoutHandler, IHttp3StreamLifetimeHandler
+    internal class Http3Connection : IHttp3StreamLifetimeHandler, IRequestProcessor
     {
         // Internal for unit testing
         internal readonly Dictionary<long, IHttp3Stream> _streams = new Dictionary<long, IHttp3Stream>();
         internal IHttp3StreamLifetimeHandler _streamLifetimeHandler;
 
         private long _highestOpenedStreamId;
-        private readonly object _sync = new object(); 
+        private readonly object _sync = new object();
         private readonly MultiplexedConnectionContext _multiplexedContext;
-        private readonly Http3ConnectionContext _context;
-        private readonly ISystemClock _systemClock;
-        private readonly TimeoutControl _timeoutControl;
+        private readonly HttpMultiplexedConnectionContext _context;
         private bool _aborted;
         private readonly object _protocolSelectionLock = new object();
         private int _gracefulCloseInitiator;
         private int _isClosed;
         private bool _gracefulCloseStarted;
-        private int _activeRequestCount = 0;
+        private int _activeRequestCount;
 
         private readonly Http3PeerSettings _serverSettings = new Http3PeerSettings();
         private readonly StreamCloseAwaitable _streamCompletionAwaitable = new StreamCloseAwaitable();
         private readonly IProtocolErrorCodeFeature _errorCodeFeature;
 
-        public Http3Connection(Http3ConnectionContext context)
+        public Http3Connection(HttpMultiplexedConnectionContext context)
         {
-            _multiplexedContext = context.ConnectionContext;
+            _multiplexedContext = (MultiplexedConnectionContext)context.ConnectionContext;
             _context = context;
-            _systemClock = context.ServiceContext.SystemClock;
-            _timeoutControl = new TimeoutControl(this);
-            _context.TimeoutControl ??= _timeoutControl;
             _streamLifetimeHandler = this;
 
             _errorCodeFeature = context.ConnectionFeatures.Get<IProtocolErrorCodeFeature>()!;
@@ -85,37 +80,6 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http3
         public Http3ControlStream? DecoderStream { get; set; }
         public string ConnectionId => _context.ConnectionId;
 
-        public async Task ProcessStreamsAsync<TContext>(IHttpApplication<TContext> httpApplication) where TContext : notnull
-        {
-            try
-            {
-                var connectionHeartbeatFeature = _context.ConnectionFeatures.Get<IConnectionHeartbeatFeature>();
-                var connectionLifetimeNotificationFeature = _context.ConnectionFeatures.Get<IConnectionLifetimeNotificationFeature>();
-
-                // These features should never be null in Kestrel itself, if this middleware is ever refactored to run outside of kestrel,
-                // we'll need to handle these missing.
-                Debug.Assert(connectionHeartbeatFeature != null, nameof(IConnectionHeartbeatFeature) + " is missing!");
-                Debug.Assert(connectionLifetimeNotificationFeature != null, nameof(IConnectionLifetimeNotificationFeature) + " is missing!");
-
-                // Register the various callbacks once we're going to start processing requests
-
-                // The heart beat for various timeouts
-                connectionHeartbeatFeature?.OnHeartbeat(state => ((Http3Connection)state).Tick(), this);
-
-                // Register for graceful shutdown of the server
-                using var shutdownRegistration = connectionLifetimeNotificationFeature?.ConnectionClosedRequested.Register(state => ((Http3Connection)state!).StopProcessingNextRequest(), this);
-
-                // Register for connection close
-                using var closedRegistration = _context.ConnectionContext.ConnectionClosed.Register(state => ((Http3Connection)state!).OnConnectionClosed(), this);
-
-                await InnerProcessStreamsAsync(httpApplication);
-            }
-            catch (Exception ex)
-            {
-                Log.LogCritical(0, ex, $"Unexpected exception in {nameof(Http3Connection)}.{nameof(ProcessStreamsAsync)}.");
-            }
-        }
-
         public void StopProcessingNextRequest()
             => StopProcessingNextRequest(serverInitiated: true);
 
@@ -133,6 +97,11 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http3
 
                 if (Interlocked.CompareExchange(ref _gracefulCloseInitiator, initiator, GracefulCloseInitiator.None) == GracefulCloseInitiator.None)
                 {
+                    // https://quicwg.org/base-drafts/draft-ietf-quic-http.html#section-5.2-11
+                    // An endpoint that completes a graceful shutdown SHOULD use the H3_NO_ERROR error code
+                    // when closing the connection.
+                    _errorCodeFeature.Error = (long)Http3ErrorCode.NoError;
+
                     // Abort accept async loop to initiate graceful shutdown
                     // TODO aborting connection isn't graceful due to runtime issue, will drop data on streams
                     // Either we need to swap to using a cts here or fix runtime to gracefully close connection.
@@ -168,6 +137,11 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http3
             return false;
         }
 
+        public void Abort(ConnectionAbortedException ex)
+        {
+            Abort(ex, Http3ErrorCode.InternalError);
+        }
+
         public void Abort(ConnectionAbortedException ex, Http3ErrorCode errorCode)
         {
             bool previousState;
@@ -191,7 +165,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http3
             }
         }
 
-        public void Tick()
+        public void Tick(DateTimeOffset now)
         {
             if (_aborted)
             {
@@ -200,12 +174,12 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http3
                 return;
             }
 
-            UpdateStartingStreams();
+            UpdateStartingStreams(now);
         }
 
-        private void UpdateStartingStreams()
+        private void UpdateStartingStreams(DateTimeOffset now)
         {
-            var now = _systemClock.UtcNow.Ticks;
+            var ticks = now.Ticks;
 
             lock (_streams)
             {
@@ -219,11 +193,11 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http3
                     if (stream.HeaderTimeoutTicks == default)
                     {
                         // On expiration overflow, use max value.
-                        var expirationTicks = now + _context.ServiceContext.ServerOptions.Limits.RequestHeadersTimeout.Ticks;
+                        var expirationTicks = ticks + _context.ServiceContext.ServerOptions.Limits.RequestHeadersTimeout.Ticks;
                         stream.HeaderTimeoutTicks = expirationTicks >= 0 ? expirationTicks : long.MaxValue;
                     }
 
-                    if (stream.HeaderTimeoutTicks < now)
+                    if (stream.HeaderTimeoutTicks < ticks)
                     {
                         if (stream.IsRequestStream)
                         {
@@ -238,29 +212,7 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http3
             }
         }
 
-        public void OnTimeout(TimeoutReason reason)
-        {
-            // In the cases that don't log directly here, we expect the setter of the timeout to also be the input
-            // reader, so when the read is canceled or aborted, the reader should write the appropriate log.
-
-            // TODO what timeouts should we handle here? Is keep alive something we should care about?
-            switch (reason)
-            {
-                case TimeoutReason.TimeoutFeature:
-                    SendGoAway(GetHighestStreamId()).Preserve();
-                    break;
-                case TimeoutReason.RequestHeaders: // Request header timeout is handled in starting stream queue
-                case TimeoutReason.KeepAlive:  // Keep-alive is handled by msquic
-                case TimeoutReason.ReadDataRate:
-                case TimeoutReason.WriteDataRate:
-                case TimeoutReason.RequestBodyDrain:
-                default:
-                    Debug.Assert(false, "Invalid TimeoutReason");
-                    break;
-            }
-        }
-
-        internal async Task InnerProcessStreamsAsync<TContext>(IHttpApplication<TContext> application) where TContext : notnull
+        public async Task ProcessRequestsAsync<TContext>(IHttpApplication<TContext> application) where TContext : notnull
         {
             // An endpoint MAY avoid creating an encoder stream if it's not going to
             // be used(for example if its encoder doesn't wish to use the dynamic
@@ -392,6 +344,9 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http3
                     {
                         await _streamCompletionAwaitable;
                     }
+
+                    _context.TimeoutControl.CancelTimeout();
+                    _context.TimeoutControl.StartDrainTimeout(Limits.MinResponseDataRate, Limits.MaxResponseBufferSize);
                 }
                 catch
                 {
@@ -578,6 +533,26 @@ namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Http3
         void IHttp3StreamLifetimeHandler.OnStreamHeaderReceived(IHttp3Stream stream)
         {
             Debug.Assert(stream.ReceivedHeader);
+        }
+
+        public void HandleRequestHeadersTimeout()
+        {
+            Log.ConnectionBadRequest(ConnectionId, KestrelBadHttpRequestException.GetException(RequestRejectionReason.RequestHeadersTimeout));
+            Abort(new ConnectionAbortedException(CoreStrings.BadRequest_RequestHeadersTimeout));
+        }
+
+        public void HandleReadDataRateTimeout()
+        {
+            Debug.Assert(Limits.MinRequestBodyDataRate != null);
+
+            Log.RequestBodyMinimumDataRateNotSatisfied(ConnectionId, null, Limits.MinRequestBodyDataRate.BytesPerSecond);
+            Abort(new ConnectionAbortedException(CoreStrings.BadRequest_RequestBodyTimeout));
+        }
+
+        public void OnInputOrOutputCompleted()
+        {
+            TryClose();
+            Abort(new ConnectionAbortedException(CoreStrings.ConnectionAbortedByClient), Http3ErrorCode.InternalError);
         }
 
         private static class GracefulCloseInitiator
