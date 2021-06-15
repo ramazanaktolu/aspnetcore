@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Linq.Expressions;
@@ -30,7 +31,7 @@ namespace Microsoft.AspNetCore.Http
         private static readonly MethodInfo ExecuteTaskResultOfTMethod = typeof(RequestDelegateFactory).GetMethod(nameof(ExecuteTaskResult), BindingFlags.NonPublic | BindingFlags.Static)!;
         private static readonly MethodInfo ExecuteValueResultTaskOfTMethod = typeof(RequestDelegateFactory).GetMethod(nameof(ExecuteValueTaskResult), BindingFlags.NonPublic | BindingFlags.Static)!;
         private static readonly MethodInfo GetRequiredServiceMethod = typeof(ServiceProviderServiceExtensions).GetMethod(nameof(ServiceProviderServiceExtensions.GetRequiredService), BindingFlags.Public | BindingFlags.Static, new Type[] { typeof(IServiceProvider) })!;
-        private static readonly MethodInfo ResultWriteResponseAsyncMethod = typeof(IResult).GetMethod(nameof(IResult.ExecuteAsync), BindingFlags.Public | BindingFlags.Instance)!;
+        private static readonly MethodInfo ResultWriteResponseAsyncMethod = typeof(RequestDelegateFactory).GetMethod(nameof(ExecuteResultWriteResponse), BindingFlags.NonPublic | BindingFlags.Static)!;
         private static readonly MethodInfo StringResultWriteResponseAsyncMethod = GetMethodInfo<Func<HttpResponse, string, Task>>((response, text) => HttpResponseWritingExtensions.WriteAsync(response, text, default));
         private static readonly MethodInfo JsonResultWriteResponseAsyncMethod = GetMethodInfo<Func<HttpResponse, object, Task>>((response, value) => HttpResponseJsonExtensions.WriteAsJsonAsync(response, value, default));
         private static readonly MethodInfo EnumTryParseMethod = GetEnumTryParseMethod();
@@ -61,8 +62,9 @@ namespace Microsoft.AspNetCore.Http
         /// Creates a <see cref="RequestDelegate"/> implementation for <paramref name="action"/>.
         /// </summary>
         /// <param name="action">A request handler with any number of custom parameters that often produces a response with its return value.</param>
+        /// <param name="serviceProvider">The <see cref="IServiceProvider"/> instance used to detect which parameters are services.</param>
         /// <returns>The <see cref="RequestDelegate"/>.</returns>
-        public static RequestDelegate Create(Delegate action)
+        public static RequestDelegate Create(Delegate action, IServiceProvider? serviceProvider)
         {
             if (action is null)
             {
@@ -75,7 +77,7 @@ namespace Microsoft.AspNetCore.Http
                 null => null,
             };
 
-            var targetableRequestDelegate = CreateTargetableRequestDelegate(action.Method, targetExpression);
+            var targetableRequestDelegate = CreateTargetableRequestDelegate(action.Method, serviceProvider, targetExpression);
 
             return httpContext =>
             {
@@ -87,15 +89,16 @@ namespace Microsoft.AspNetCore.Http
         /// Creates a <see cref="RequestDelegate"/> implementation for <paramref name="methodInfo"/>.
         /// </summary>
         /// <param name="methodInfo">A static request handler with any number of custom parameters that often produces a response with its return value.</param>
+        /// <param name="serviceProvider">The <see cref="IServiceProvider"/> instance used to detect which parameters are services.</param>
         /// <returns>The <see cref="RequestDelegate"/>.</returns>
-        public static RequestDelegate Create(MethodInfo methodInfo)
+        public static RequestDelegate Create(MethodInfo methodInfo, IServiceProvider? serviceProvider)
         {
             if (methodInfo is null)
             {
                 throw new ArgumentNullException(nameof(methodInfo));
             }
 
-            var targetableRequestDelegate = CreateTargetableRequestDelegate(methodInfo, targetExpression: null);
+            var targetableRequestDelegate = CreateTargetableRequestDelegate(methodInfo, serviceProvider, targetExpression: null);
 
             return httpContext =>
             {
@@ -107,9 +110,10 @@ namespace Microsoft.AspNetCore.Http
         /// Creates a <see cref="RequestDelegate"/> implementation for <paramref name="methodInfo"/>.
         /// </summary>
         /// <param name="methodInfo">A request handler with any number of custom parameters that often produces a response with its return value.</param>
+        /// <param name="serviceProvider">The <see cref="IServiceProvider"/> instance used to detect which parameters are services.</param>
         /// <param name="targetFactory">Creates the <see langword="this"/> for the non-static method.</param>
         /// <returns>The <see cref="RequestDelegate"/>.</returns>
-        public static RequestDelegate Create(MethodInfo methodInfo, Func<HttpContext, object> targetFactory)
+        public static RequestDelegate Create(MethodInfo methodInfo, IServiceProvider? serviceProvider, Func<HttpContext, object> targetFactory)
         {
             if (methodInfo is null)
             {
@@ -127,7 +131,7 @@ namespace Microsoft.AspNetCore.Http
             }
 
             var targetExpression = Expression.Convert(TargetExpr, methodInfo.DeclaringType);
-            var targetableRequestDelegate = CreateTargetableRequestDelegate(methodInfo, targetExpression);
+            var targetableRequestDelegate = CreateTargetableRequestDelegate(methodInfo, serviceProvider, targetExpression);
 
             return httpContext =>
             {
@@ -135,7 +139,7 @@ namespace Microsoft.AspNetCore.Http
             };
         }
 
-        private static Func<object?, HttpContext, Task> CreateTargetableRequestDelegate(MethodInfo methodInfo, Expression? targetExpression)
+        private static Func<object?, HttpContext, Task> CreateTargetableRequestDelegate(MethodInfo methodInfo, IServiceProvider? serviceProvider, Expression? targetExpression)
         {
             // Non void return type
 
@@ -153,7 +157,10 @@ namespace Microsoft.AspNetCore.Http
             //     return default;
             // }
 
-            var factoryContext = new FactoryContext();
+            var factoryContext = new FactoryContext()
+            {
+                ServiceProvider = serviceProvider
+            };
 
             var arguments = CreateArguments(methodInfo.GetParameters(), factoryContext);
 
@@ -233,6 +240,15 @@ namespace Microsoft.AspNetCore.Http
             }
             else
             {
+                if (factoryContext.ServiceProvider?.GetService<IServiceProviderIsService>() is IServiceProviderIsService serviceProviderIsService)
+                {
+                    // If the parameter resolves as a service then get it from services
+                    if (serviceProviderIsService.IsService(parameter.ParameterType))
+                    {
+                        return Expression.Call(GetRequiredServiceMethod.MakeGenericMethod(parameter.ParameterType), RequestServicesExpr);
+                    }
+                }
+
                 return BindParameterFromBody(parameter.ParameterType, allowEmpty: false, factoryContext);
             }
         }
@@ -393,7 +409,7 @@ namespace Microsoft.AspNetCore.Http
             }
             else if (typeof(IResult).IsAssignableFrom(returnType))
             {
-                return Expression.Call(methodCall, ResultWriteResponseAsyncMethod, HttpContextExpr);
+                return Expression.Call(ResultWriteResponseAsyncMethod, methodCall, HttpContextExpr);
             }
             else if (returnType == typeof(string))
             {
@@ -679,6 +695,8 @@ namespace Microsoft.AspNetCore.Http
 
         private static Task ExecuteTask<T>(Task<T> task, HttpContext httpContext)
         {
+            EnsureRequestTaskNotNull(task);
+
             static async Task ExecuteAwaited(Task<T> task, HttpContext httpContext)
             {
                 await httpContext.Response.WriteAsJsonAsync(await task);
@@ -692,8 +710,10 @@ namespace Microsoft.AspNetCore.Http
             return ExecuteAwaited(task, httpContext);
         }
 
-        private static Task ExecuteTaskOfString(Task<string> task, HttpContext httpContext)
+        private static Task ExecuteTaskOfString(Task<string?> task, HttpContext httpContext)
         {
+            EnsureRequestTaskNotNull(task);
+
             static async Task ExecuteAwaited(Task<string> task, HttpContext httpContext)
             {
                 await httpContext.Response.WriteAsync(await task);
@@ -701,10 +721,10 @@ namespace Microsoft.AspNetCore.Http
 
             if (task.IsCompletedSuccessfully)
             {
-                return httpContext.Response.WriteAsync(task.GetAwaiter().GetResult());
+                return httpContext.Response.WriteAsync(task.GetAwaiter().GetResult()!);
             }
 
-            return ExecuteAwaited(task, httpContext);
+            return ExecuteAwaited(task!, httpContext);
         }
 
         private static Task ExecuteValueTask(ValueTask task)
@@ -737,7 +757,7 @@ namespace Microsoft.AspNetCore.Http
             return ExecuteAwaited(task, httpContext);
         }
 
-        private static Task ExecuteValueTaskOfString(ValueTask<string> task, HttpContext httpContext)
+        private static Task ExecuteValueTaskOfString(ValueTask<string?> task, HttpContext httpContext)
         {
             static async Task ExecuteAwaited(ValueTask<string> task, HttpContext httpContext)
             {
@@ -746,36 +766,44 @@ namespace Microsoft.AspNetCore.Http
 
             if (task.IsCompletedSuccessfully)
             {
-                return httpContext.Response.WriteAsync(task.GetAwaiter().GetResult());
+                return httpContext.Response.WriteAsync(task.GetAwaiter().GetResult()!);
             }
 
-            return ExecuteAwaited(task, httpContext);
+            return ExecuteAwaited(task!, httpContext);
         }
 
-        private static Task ExecuteValueTaskResult<T>(ValueTask<T> task, HttpContext httpContext) where T : IResult
+        private static Task ExecuteValueTaskResult<T>(ValueTask<T?> task, HttpContext httpContext) where T : IResult
         {
             static async Task ExecuteAwaited(ValueTask<T> task, HttpContext httpContext)
             {
-                await (await task).ExecuteAsync(httpContext);
+                await EnsureRequestResultNotNull(await task)!.ExecuteAsync(httpContext);
             }
 
             if (task.IsCompletedSuccessfully)
             {
-                return task.GetAwaiter().GetResult().ExecuteAsync(httpContext);
+                return EnsureRequestResultNotNull(task.GetAwaiter().GetResult())!.ExecuteAsync(httpContext);
             }
 
-            return ExecuteAwaited(task, httpContext);
+            return ExecuteAwaited(task!, httpContext);
         }
 
-        private static async Task ExecuteTaskResult<T>(Task<T> task, HttpContext httpContext) where T : IResult
+        private static async Task ExecuteTaskResult<T>(Task<T?> task, HttpContext httpContext) where T : IResult
         {
-            await (await task).ExecuteAsync(httpContext);
+            EnsureRequestTaskOfNotNull(task);
+
+            await EnsureRequestResultNotNull(await task)!.ExecuteAsync(httpContext);
+        }
+
+        private static async Task ExecuteResultWriteResponse(IResult result, HttpContext httpContext)
+        {
+            await EnsureRequestResultNotNull(result)!.ExecuteAsync(httpContext);
         }
 
         private class FactoryContext
         {
             public Type? JsonRequestBodyType { get; set; }
             public bool AllowEmptyRequestBody { get; set; }
+            public IServiceProvider? ServiceProvider { get; init; }
 
             public bool UsingTempSourceString { get; set; }
             public List<(ParameterExpression, Expression)> TryParseParams { get; } = new();
@@ -818,6 +846,32 @@ namespace Microsoft.AspNetCore.Http
                 var loggerFactory = httpContext.RequestServices.GetRequiredService<ILoggerFactory>();
                 return loggerFactory.CreateLogger(typeof(RequestDelegateFactory));
             }
+        }
+
+        private static void EnsureRequestTaskOfNotNull<T>(Task<T?> task) where T : IResult
+        {
+            if (task is null)
+            {
+                throw new InvalidOperationException("The IResult in Task<IResult> response must not be null.");
+            }
+        }
+
+        private static void EnsureRequestTaskNotNull(Task? task)
+        {
+            if (task is null)
+            {
+                throw new InvalidOperationException("The Task returned by the Delegate must not be null.");
+            }
+        }
+
+        private static IResult EnsureRequestResultNotNull(IResult? result)
+        {
+            if (result is null)
+            {
+                throw new InvalidOperationException("The IResult returned by the Delegate must not be null.");
+            }
+
+            return result;
         }
     }
 }
