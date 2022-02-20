@@ -7,13 +7,13 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <PackageTags>aspnetcore;kestrel</PackageTags>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <NoWarn>CS1591;$(NoWarn)</NoWarn>
     <IsPackable>false</IsPackable>
     <DefineConstants>$(DefineConstants);KESTREL</DefineConstants>
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="$(KestrelSharedSourceRoot)\PooledStreamStack.cs" Link="Internal\PooledStreamStack.cs" />
     <Compile Include="$(SharedSourceRoot)CertificateGeneration\**\*.cs" />
     <Compile Include="$(SharedSourceRoot)ValueTaskExtensions\**\*.cs" />
     <Compile Include="$(SharedSourceRoot)UrlDecoder\**\*.cs" />

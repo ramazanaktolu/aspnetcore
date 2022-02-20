@@ -1,110 +1,161 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
-using System.Collections.Generic;
-using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
 
-namespace Microsoft.AspNetCore.Hosting
+namespace Microsoft.AspNetCore.Hosting;
+
+// This exists solely to bootstrap the configuration
+internal sealed class BootstrapHostBuilder : IHostBuilder
 {
-    // This exists solely to bootstrap the configuration
-    internal class BootstrapHostBuilder : IHostBuilder
+    private readonly IServiceCollection _services;
+    private readonly List<Action<IConfigurationBuilder>> _configureHostActions = new();
+    private readonly List<Action<HostBuilderContext, IConfigurationBuilder>> _configureAppActions = new();
+    private readonly List<Action<HostBuilderContext, IServiceCollection>> _configureServicesActions = new();
+
+    private readonly List<Action<IHostBuilder>> _remainingOperations = new();
+
+    public BootstrapHostBuilder(IServiceCollection services, IDictionary<object, object> properties)
     {
-        private readonly Configuration _configuration;
-        private readonly WebHostEnvironment _environment;
+        _services = services;
 
-        private readonly HostBuilderContext _hostContext;
+        Properties = properties;
+    }
 
-        private readonly List<Action<IConfigurationBuilder>> _configureHostActions = new();
-        private readonly List<Action<HostBuilderContext, IConfigurationBuilder>> _configureAppActions = new();
+    public IDictionary<object, object> Properties { get; }
 
-        public BootstrapHostBuilder(Configuration configuration, WebHostEnvironment webHostEnvironment)
+    public IHost Build()
+    {
+        // HostingHostBuilderExtensions.ConfigureDefaults should never call this.
+        throw new InvalidOperationException();
+    }
+
+    public IHostBuilder ConfigureAppConfiguration(Action<HostBuilderContext, IConfigurationBuilder> configureDelegate)
+    {
+        _configureAppActions.Add(configureDelegate ?? throw new ArgumentNullException(nameof(configureDelegate)));
+        return this;
+    }
+
+    public IHostBuilder ConfigureContainer<TContainerBuilder>(Action<HostBuilderContext, TContainerBuilder> configureDelegate)
+    {
+        // This is not called by HostingHostBuilderExtensions.ConfigureDefaults currently, but that could change in the future.
+        // If this does get called in the future, it should be called again at a later stage on the ConfigureHostBuilder.
+        if (configureDelegate is null)
         {
-            _configuration = configuration;
-            _environment = webHostEnvironment;
-
-            _hostContext = new HostBuilderContext(Properties)
-            {
-                Configuration = configuration,
-                HostingEnvironment = webHostEnvironment
-            };
+            throw new ArgumentNullException(nameof(configureDelegate));
         }
 
-        public IDictionary<object, object> Properties { get; } = new Dictionary<object, object>();
+        _remainingOperations.Add(hostBuilder => hostBuilder.ConfigureContainer<TContainerBuilder>(configureDelegate));
+        return this;
+    }
 
-        public IHost Build()
+    public IHostBuilder ConfigureHostConfiguration(Action<IConfigurationBuilder> configureDelegate)
+    {
+        _configureHostActions.Add(configureDelegate ?? throw new ArgumentNullException(nameof(configureDelegate)));
+        return this;
+    }
+
+    public IHostBuilder ConfigureServices(Action<HostBuilderContext, IServiceCollection> configureDelegate)
+    {
+        // HostingHostBuilderExtensions.ConfigureDefaults calls this via ConfigureLogging
+        _configureServicesActions.Add(configureDelegate ?? throw new ArgumentNullException(nameof(configureDelegate)));
+        return this;
+    }
+
+    public IHostBuilder UseServiceProviderFactory<TContainerBuilder>(IServiceProviderFactory<TContainerBuilder> factory) where TContainerBuilder : notnull
+    {
+        // This is not called by HostingHostBuilderExtensions.ConfigureDefaults currently, but that could change in the future.
+        // If this does get called in the future, it should be called again at a later stage on the ConfigureHostBuilder.
+        if (factory is null)
         {
-            // HostingHostBuilderExtensions.ConfigureDefaults should never call this.
-            throw new InvalidOperationException();
+            throw new ArgumentNullException(nameof(factory));
         }
 
-        public IHostBuilder ConfigureAppConfiguration(Action<HostBuilderContext, IConfigurationBuilder> configureDelegate)
+        _remainingOperations.Add(hostBuilder => hostBuilder.UseServiceProviderFactory<TContainerBuilder>(factory));
+        return this;
+    }
+
+    public IHostBuilder UseServiceProviderFactory<TContainerBuilder>(Func<HostBuilderContext, IServiceProviderFactory<TContainerBuilder>> factory) where TContainerBuilder : notnull
+    {
+        // HostingHostBuilderExtensions.ConfigureDefaults calls this via UseDefaultServiceProvider
+        // during the initial config stage. It should be called again later on the ConfigureHostBuilder.
+        if (factory is null)
         {
-            _configureAppActions.Add(configureDelegate ?? throw new ArgumentNullException(nameof(configureDelegate)));
-            return this;
+            throw new ArgumentNullException(nameof(factory));
         }
 
-        public IHostBuilder ConfigureContainer<TContainerBuilder>(Action<HostBuilderContext, TContainerBuilder> configureDelegate)
+        _remainingOperations.Add(hostBuilder => hostBuilder.UseServiceProviderFactory<TContainerBuilder>(factory));
+        return this;
+    }
+
+    public (HostBuilderContext, ConfigurationManager) RunDefaultCallbacks(ConfigurationManager configuration, HostBuilder innerBuilder)
+    {
+        var hostConfiguration = new ConfigurationManager();
+
+        foreach (var configureHostAction in _configureHostActions)
         {
-            // This is not called by HostingHostBuilderExtensions.ConfigureDefaults currently, but that could change in the future.
-            // If this does get called in the future, it should be called again at a later stage on the ConfigureHostBuilder.
-            return this;
+            configureHostAction(hostConfiguration);
         }
 
-        public IHostBuilder ConfigureHostConfiguration(Action<IConfigurationBuilder> configureDelegate)
+        // This is the hosting environment based on configuration we've seen so far.
+        var hostingEnvironment = new HostingEnvironment()
         {
-            _configureHostActions.Add(configureDelegate ?? throw new ArgumentNullException(nameof(configureDelegate)));
-            return this;
+            // ApplicationKey is always configured by WebApplicationOptions, so it's never expected to be null
+            ApplicationName = hostConfiguration[HostDefaults.ApplicationKey]!,
+            EnvironmentName = hostConfiguration[HostDefaults.EnvironmentKey] ?? Environments.Production,
+            ContentRootPath = HostingPathResolver.ResolvePath(hostConfiguration[HostDefaults.ContentRootKey]),
+        };
+
+        hostingEnvironment.ContentRootFileProvider = new PhysicalFileProvider(hostingEnvironment.ContentRootPath);
+
+        // Normalize the content root setting for the path in configuration
+        hostConfiguration[HostDefaults.ContentRootKey] = hostingEnvironment.ContentRootPath;
+
+        var hostContext = new HostBuilderContext(Properties)
+        {
+            Configuration = hostConfiguration,
+            HostingEnvironment = hostingEnvironment,
+        };
+
+        // Split the host configuration and app configuration so that the
+        // subsequent callback don't get a chance to modify the host configuration.
+        configuration.SetBasePath(hostingEnvironment.ContentRootPath);
+
+        // Chain the host configuration and app configuration together.
+        configuration.AddConfiguration(hostConfiguration, shouldDisposeConfiguration: true);
+
+        // ConfigureAppConfiguration cannot modify the host configuration because doing so could
+        // change the environment, content root and application name which is not allowed at this stage.
+        foreach (var configureAppAction in _configureAppActions)
+        {
+            configureAppAction(hostContext, configuration);
         }
 
-        public string? GetSetting(string key)
+        // Update the host context, everything from here sees the final
+        // app configuration
+        hostContext.Configuration = configuration;
+
+        foreach (var configureServicesAction in _configureServicesActions)
         {
-            return _configuration[key];
+            configureServicesAction(hostContext, _services);
         }
 
-        public IHostBuilder ConfigureServices(Action<HostBuilderContext, IServiceCollection> configureDelegate)
+        foreach (var callback in _remainingOperations)
         {
-            // HostingHostBuilderExtensions.ConfigureDefaults calls this via ConfigureLogging
-            // during the initial config stage. It should be called again later on the ConfigureHostBuilder.
-            return this;
+            callback(innerBuilder);
         }
 
-        public IHostBuilder UseServiceProviderFactory<TContainerBuilder>(IServiceProviderFactory<TContainerBuilder> factory) where TContainerBuilder : notnull
-        {
-            // This is not called by HostingHostBuilderExtensions.ConfigureDefaults currently, but that could change in the future.
-            // If this does get called in the future, it should be called again at a later stage on the ConfigureHostBuilder.
-            return this;
-        }
+        return (hostContext, hostConfiguration);
+    }
 
-        public IHostBuilder UseServiceProviderFactory<TContainerBuilder>(Func<HostBuilderContext, IServiceProviderFactory<TContainerBuilder>> factory) where TContainerBuilder : notnull
-        {
-            // HostingHostBuilderExtensions.ConfigureDefaults calls this via UseDefaultServiceProvider
-            // during the initial config stage. It should be called again later on the ConfigureHostBuilder.
-            return this;
-        }
-
-        internal void RunConfigurationCallbacks()
-        {
-            foreach (var configureHostAction in _configureHostActions)
-            {
-                configureHostAction(_configuration);
-            }
-
-            // Configuration doesn't auto-update during the bootstrap phase to reduce I/O,
-            // but we do need to update between host and app configuration so the right environment is used.
-            _configuration.Update();
-            _environment.ApplyConfigurationSettings(_configuration);
-
-            foreach (var configureAppAction in _configureAppActions)
-            {
-                configureAppAction(_hostContext, _configuration);
-            }
-
-            _configuration.Update();
-            _environment.ApplyConfigurationSettings(_configuration);
-        }
+    private class HostingEnvironment : IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = default!;
+        public string ApplicationName { get; set; } = default!;
+        public string ContentRootPath { get; set; } = default!;
+        public IFileProvider ContentRootFileProvider { get; set; } = default!;
     }
 }

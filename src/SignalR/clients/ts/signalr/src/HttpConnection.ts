@@ -1,8 +1,8 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 import { DefaultHttpClient } from "./DefaultHttpClient";
-import { HttpError } from "./Errors";
+import { AggregateErrors, DisabledTransportError, FailedToNegotiateWithServerError, FailedToStartTransportError, HttpError, UnsupportedTransportError, AbortError } from "./Errors";
 import { HeaderNames } from "./HeaderNames";
 import { HttpClient } from "./HttpClient";
 import { IConnection } from "./IConnection";
@@ -81,6 +81,7 @@ export class HttpConnection implements IConnection {
         } else {
             throw new Error("withCredentials option was not a 'boolean' or 'undefined' value");
         }
+        options.timeout = options.timeout === undefined ? 100 * 1000 : options.timeout;
 
         let webSocketModule: any = null;
         let eventSourceModule: any = null;
@@ -145,12 +146,12 @@ export class HttpConnection implements IConnection {
             // We cannot await stopPromise inside startInternal since stopInternal awaits the startInternalPromise.
             await this._stopPromise;
 
-            return Promise.reject(new Error(message));
+            return Promise.reject(new AbortError(message));
         } else if (this._connectionState as any !== ConnectionState.Connected) {
             // stop() was called and transitioned the client into the Disconnecting state.
             const message = "HttpConnection.startInternal completed gracefully but didn't enter the connection into the connected state!";
             this._logger.log(LogLevel.Error, message);
-            return Promise.reject(new Error(message));
+            return Promise.reject(new AbortError(message));
         }
 
         this._connectionStarted = true;
@@ -246,7 +247,7 @@ export class HttpConnection implements IConnection {
                     negotiateResponse = await this._getNegotiationResponse(url);
                     // the user tries to stop the connection when it is being started
                     if (this._connectionState === ConnectionState.Disconnecting || this._connectionState === ConnectionState.Disconnected) {
-                        throw new Error("The connection was stopped during negotiation.");
+                        throw new AbortError("The connection was stopped during negotiation.");
                     }
 
                     if (negotiateResponse.error) {
@@ -305,7 +306,7 @@ export class HttpConnection implements IConnection {
     }
 
     private async _getNegotiationResponse(url: string): Promise<INegotiateResponse> {
-        const headers = {};
+        const headers: {[k: string]: string} = {};
         if (this._accessTokenFactory) {
             const token = await this._accessTokenFactory();
             if (token) {
@@ -322,6 +323,7 @@ export class HttpConnection implements IConnection {
             const response = await this._httpClient.post(negotiateUrl, {
                 content: "",
                 headers: { ...headers, ...this._options.headers },
+                timeout: this._options.timeout,
                 withCredentials: this._options.withCredentials,
             });
 
@@ -345,7 +347,7 @@ export class HttpConnection implements IConnection {
             }
             this._logger.log(LogLevel.Error, errorMessage);
 
-            return Promise.reject(new Error(errorMessage));
+            return Promise.reject(new FailedToNegotiateWithServerError(errorMessage));
         }
     }
 
@@ -375,7 +377,8 @@ export class HttpConnection implements IConnection {
             const transportOrError = this._resolveTransportOrError(endpoint, requestedTransport, requestedTransferFormat);
             if (transportOrError instanceof Error) {
                 // Store the error and continue, we don't want to cause a re-negotiate in these cases
-                transportExceptions.push(`${endpoint.transport} failed: ${transportOrError}`);
+                transportExceptions.push(`${endpoint.transport} failed:`);
+                transportExceptions.push(transportOrError);
             } else if (this._isITransport(transportOrError)) {
                 this.transport = transportOrError;
                 if (!negotiate) {
@@ -393,19 +396,19 @@ export class HttpConnection implements IConnection {
                 } catch (ex) {
                     this._logger.log(LogLevel.Error, `Failed to start the transport '${endpoint.transport}': ${ex}`);
                     negotiate = undefined;
-                    transportExceptions.push(`${endpoint.transport} failed: ${ex}`);
+                    transportExceptions.push(new FailedToStartTransportError(`${endpoint.transport} failed: ${ex}`, HttpTransportType[endpoint.transport]));
 
                     if (this._connectionState !== ConnectionState.Connecting) {
                         const message = "Failed to select transport before stop() was called.";
                         this._logger.log(LogLevel.Debug, message);
-                        return Promise.reject(new Error(message));
+                        return Promise.reject(new AbortError(message));
                     }
                 }
             }
         }
 
         if (transportExceptions.length > 0) {
-            return Promise.reject(new Error(`Unable to connect to the server with any of the available transports. ${transportExceptions.join(" ")}`));
+            return Promise.reject(new AggregateErrors(`Unable to connect to the server with any of the available transports. ${transportExceptions.join(" ")}`, transportExceptions));
         }
         return Promise.reject(new Error("None of the transports supported by the client are supported by the server."));
     }
@@ -416,14 +419,14 @@ export class HttpConnection implements IConnection {
                 if (!this._options.WebSocket) {
                     throw new Error("'WebSocket' is not supported in your environment.");
                 }
-                return new WebSocketTransport(this._httpClient, this._accessTokenFactory, this._logger, this._options.logMessageContent || false, this._options.WebSocket, this._options.headers || {});
+                return new WebSocketTransport(this._httpClient, this._accessTokenFactory, this._logger, this._options.logMessageContent!, this._options.WebSocket, this._options.headers || {});
             case HttpTransportType.ServerSentEvents:
                 if (!this._options.EventSource) {
                     throw new Error("'EventSource' is not supported in your environment.");
                 }
-                return new ServerSentEventsTransport(this._httpClient, this._accessTokenFactory, this._logger, this._options.logMessageContent || false, this._options.EventSource, this._options.withCredentials!, this._options.headers || {});
+                return new ServerSentEventsTransport(this._httpClient, this._accessTokenFactory, this._logger, this._options);
             case HttpTransportType.LongPolling:
-                return new LongPollingTransport(this._httpClient, this._accessTokenFactory, this._logger, this._options.logMessageContent || false, this._options.withCredentials!, this._options.headers || {});
+                return new LongPollingTransport(this._httpClient, this._accessTokenFactory, this._logger, this._options);
             default:
                 throw new Error(`Unknown transport: ${transport}.`);
         }
@@ -447,7 +450,7 @@ export class HttpConnection implements IConnection {
                     if ((transport === HttpTransportType.WebSockets && !this._options.WebSocket) ||
                         (transport === HttpTransportType.ServerSentEvents && !this._options.EventSource)) {
                         this._logger.log(LogLevel.Debug, `Skipping transport '${HttpTransportType[transport]}' because it is not supported in your environment.'`);
-                        return new Error(`'${HttpTransportType[transport]}' is not supported in your environment.`);
+                        return new UnsupportedTransportError(`'${HttpTransportType[transport]}' is not supported in your environment.`, transport);
                     } else {
                         this._logger.log(LogLevel.Debug, `Selecting transport '${HttpTransportType[transport]}'.`);
                         try {
@@ -462,7 +465,7 @@ export class HttpConnection implements IConnection {
                 }
             } else {
                 this._logger.log(LogLevel.Debug, `Skipping transport '${HttpTransportType[transport]}' because it was disabled by the client.`);
-                return new Error(`'${HttpTransportType[transport]}' is disabled by the client.`);
+                return new DisabledTransportError(`'${HttpTransportType[transport]}' is disabled by the client.`, transport);
             }
         }
     }
@@ -530,7 +533,7 @@ export class HttpConnection implements IConnection {
             return url;
         }
 
-        if (!Platform.isBrowser || !window.document) {
+        if (!Platform.isBrowser) {
             throw new Error(`Cannot resolve '${url}'.`);
         }
 

@@ -1,5 +1,5 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 using System;
 using System.Collections.Generic;
@@ -9,7 +9,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 #if INSTALLPLAYWRIGHT
-using PlaywrightSharp;
+using Microsoft.Playwright;
 #endif
 
 namespace RunTests
@@ -43,9 +43,6 @@ namespace RunTests
                 var dotnetEFFullPath = Path.Combine(nugetRestore, helixDir, "dotnet-ef.exe");
                 Console.WriteLine($"Set DotNetEfFullPath: {dotnetEFFullPath}");
                 EnvironmentVariables.Add("DotNetEfFullPath", dotnetEFFullPath);
-                var appRuntimePath = $"{Options.DotnetRoot}/shared/Microsoft.AspNetCore.App/{Options.RuntimeVersion}";
-                Console.WriteLine($"Set ASPNET_RUNTIME_PATH: {appRuntimePath}");
-                EnvironmentVariables.Add("ASPNET_RUNTIME_PATH", appRuntimePath);
                 var dumpPath = Environment.GetEnvironmentVariable("HELIX_DUMP_FOLDER");
                 Console.WriteLine($"Set VSTEST_DUMP_PATH: {dumpPath}");
                 EnvironmentVariables.Add("VSTEST_DUMP_PATH", dumpPath);
@@ -55,9 +52,6 @@ namespace RunTests
                 var playwrightBrowsers = Environment.GetEnvironmentVariable("PLAYWRIGHT_BROWSERS_PATH");
                 Console.WriteLine($"Setting PLAYWRIGHT_BROWSERS_PATH: {playwrightBrowsers}");
                 EnvironmentVariables.Add("PLAYWRIGHT_BROWSERS_PATH", playwrightBrowsers);
-                var playrightDriver = Environment.GetEnvironmentVariable("PLAYWRIGHT_DRIVER_PATH");
-                Console.WriteLine($"Setting PLAYWRIGHT_DRIVER_PATH: {playrightDriver}");
-                EnvironmentVariables.Add("PLAYWRIGHT_DRIVER_PATH", playrightDriver);
 #else
                 Console.WriteLine($"Skipping setting PLAYWRIGHT_BROWSERS_PATH");
 #endif
@@ -112,8 +106,10 @@ namespace RunTests
         {
             try
             {
-                Console.WriteLine($"Installing Playwright to Browsers: {Environment.GetEnvironmentVariable("PLAYWRIGHT_BROWSERS_PATH")} Driver: {Environment.GetEnvironmentVariable("PLAYWRIGHT_DRIVER_PATH")}");
-                await Playwright.InstallAsync(Environment.GetEnvironmentVariable("PLAYWRIGHT_BROWSERS_PATH"), Environment.GetEnvironmentVariable("PLAYWRIGHT_DRIVER_PATH"));
+                Console.WriteLine($"Installing Playwright Browsers to {Environment.GetEnvironmentVariable("PLAYWRIGHT_BROWSERS_PATH")}");
+
+                var exitCode = Microsoft.Playwright.Program.Main(new[] { "install" });
+
                 DisplayContents(Environment.GetEnvironmentVariable("PLAYWRIGHT_BROWSERS_PATH"));
                 return true;
             }
@@ -269,7 +265,7 @@ namespace RunTests
             if (File.Exists("TestResults/TestResults.xml"))
             {
                 Console.WriteLine("Copying TestResults/TestResults.xml to ./testResults.xml");
-                File.Copy("TestResults/TestResults.xml", "testResults.xml");
+                File.Copy("TestResults/TestResults.xml", "testResults.xml", overwrite: true);
             }
             else
             {

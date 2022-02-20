@@ -1,20 +1,17 @@
-﻿// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
+namespace Microsoft.AspNetCore.SpaProxy;
 
-namespace Microsoft.AspNetCore.SpaProxy
+internal class SpaDevelopmentServerOptions
 {
-    internal class SpaDevelopmentServerOptions
-        {
-            public string ServerUrl { get; set; } = "";
+    public string ServerUrl { get; set; } = "";
 
-            public string LaunchCommand { get; set; } = "";
+    public string LaunchCommand { get; set; } = "";
 
-            public int MaxTimeoutInSeconds { get; set; }
+    public int MaxTimeoutInSeconds { get; set; }
 
-            public TimeSpan MaxTimeout => TimeSpan.FromSeconds(MaxTimeoutInSeconds);
+    public TimeSpan MaxTimeout => TimeSpan.FromSeconds(MaxTimeoutInSeconds);
 
-            public string WorkingDirectory { get; set; } = "";
-        }
+    public string WorkingDirectory { get; set; } = "";
 }

@@ -1,6 +1,7 @@
 <Project>
   <PropertyGroup>
-    <IsTestProject>true</IsTestProject>
+    <IsUnitTestProject>true</IsUnitTestProject>
+    <TestDependsOnAspNetRuntime>false</TestDependsOnAspNetRuntime>
   </PropertyGroup>
 
   <Import Project="$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildThisFileDirectory), Directory.Build.props))\Directory.Build.props" />

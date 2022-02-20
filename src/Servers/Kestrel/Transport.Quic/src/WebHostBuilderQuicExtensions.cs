@@ -1,19 +1,26 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
-using System;
+using System.Net.Quic;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Server.Kestrel.Transport.Quic;
 using Microsoft.Extensions.DependencyInjection;
 
-namespace Microsoft.AspNetCore.Hosting
+namespace Microsoft.AspNetCore.Hosting;
+
+/// <summary>
+/// <see cref="IWebHostBuilder" /> extension methods to configure the Quic transport to be used by Kestrel.
+/// </summary>
+public static class WebHostBuilderQuicExtensions
 {
     /// <summary>
-    /// Quic <see cref="IWebHostBuilder"/> extensions.
+    /// Specify Quic as the transport to be used by Kestrel.
     /// </summary>
-    public static class WebHostBuilderQuicExtensions
+    /// <param name="hostBuilder">The <see cref="IWebHostBuilder"/> to configure.</param>
+    /// <returns>The <see cref="IWebHostBuilder"/>.</returns>
+    public static IWebHostBuilder UseQuic(this IWebHostBuilder hostBuilder)
     {
-        public static IWebHostBuilder UseQuic(this IWebHostBuilder hostBuilder)
+        if (QuicImplementationProviders.Default.IsSupported)
         {
             return hostBuilder.ConfigureServices(services =>
             {
@@ -21,12 +28,20 @@ namespace Microsoft.AspNetCore.Hosting
             });
         }
 
-        public static IWebHostBuilder UseQuic(this IWebHostBuilder hostBuilder, Action<QuicTransportOptions> configureOptions)
+        return hostBuilder;
+    }
+
+    /// <summary>
+    /// Specify Quic as the transport to be used by Kestrel.
+    /// </summary>
+    /// <param name="hostBuilder">The <see cref="IWebHostBuilder"/> to configure.</param>
+    /// <param name="configureOptions">A callback to configure transport options.</param>
+    /// <returns>The <see cref="IWebHostBuilder"/>.</returns>
+    public static IWebHostBuilder UseQuic(this IWebHostBuilder hostBuilder, Action<QuicTransportOptions> configureOptions)
+    {
+        return hostBuilder.UseQuic().ConfigureServices(services =>
         {
-            return hostBuilder.UseQuic().ConfigureServices(services =>
-            {
-                services.Configure(configureOptions);
-            });
-        }
+            services.Configure(configureOptions);
+        });
     }
 }

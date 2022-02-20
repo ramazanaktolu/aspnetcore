@@ -1,24 +1,26 @@
-// Copyright (c) .NET Foundation. All rights reserved.
-// Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
 
 using System.Buffers;
 using System.Net;
 using Microsoft.AspNetCore.Connections;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Server.Kestrel.Core.Internal.Infrastructure;
 
-namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal
+namespace Microsoft.AspNetCore.Server.Kestrel.Core.Internal;
+
+internal class HttpMultiplexedConnectionContext : BaseHttpConnectionContext
 {
-    internal class HttpMultiplexedConnectionContext : BaseHttpConnectionContext
+    public HttpMultiplexedConnectionContext(
+        string connectionId,
+        HttpProtocols protocols,
+        AltSvcHeader? altSvcHeader,
+        MultiplexedConnectionContext connectionContext,
+        ServiceContext serviceContext,
+        IFeatureCollection connectionFeatures,
+        MemoryPool<byte> memoryPool,
+        IPEndPoint? localEndPoint,
+        IPEndPoint? remoteEndPoint) : base(connectionId, protocols, altSvcHeader, connectionContext, serviceContext, connectionFeatures, memoryPool, localEndPoint, remoteEndPoint)
     {
-        public HttpMultiplexedConnectionContext(
-            string connectionId,
-            MultiplexedConnectionContext connectionContext,
-            ServiceContext serviceContext,
-            IFeatureCollection connectionFeatures,
-            MemoryPool<byte> memoryPool,
-            IPEndPoint? localEndPoint,
-            IPEndPoint? remoteEndPoint) : base(connectionId, HttpProtocols.Http3, connectionContext, serviceContext, connectionFeatures, memoryPool, localEndPoint, remoteEndPoint)
-        {
-        }
     }
 }
